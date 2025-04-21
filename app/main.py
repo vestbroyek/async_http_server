@@ -10,7 +10,7 @@ def main():
     conn, addr = server_socket.accept() # wait for client
     with conn:
         print(f"Connected by {addr}")
-        resp = b"HTTP/1.1 200 OK \r\n"
+        resp = b"HTTP/1.1 200 OK\r\n\r\n"
         conn.sendall(resp)
 
 
