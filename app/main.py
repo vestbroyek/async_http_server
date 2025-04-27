@@ -1,4 +1,5 @@
 from __future__ import annotations
+import argparse
 import asyncio
 from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 CRLF = "\r\n"
-
+REQ_LINE_200 = b"HTTP/1.1 200 OK"
 
 def extract_params(requested_target: str) -> str | None:
     if requested_target.count("/") == 1:
@@ -49,13 +50,15 @@ type Route = Callable[..., Coroutine[Any, Any, bytes]]
 
 
 class HTTPServer:
-    def __init__(self, port: int, bufsize: int = 1024) -> None:
+    def __init__(self, port: int, directory: str, bufsize: int = 1024) -> None:
         self.port = port
+        self.directory = directory
         self.bufsize = bufsize
         self.routes: dict[str, Route] = {
             "/": self.home,
             "/echo": self.echo,
             "/user-agent": self.user_agent,
+            "/files": self.files,
         }
 
     async def start(self) -> None:
@@ -70,16 +73,39 @@ class HTTPServer:
         return f"HTTP/1.1 {status_code} {reason}{CRLF}{CRLF}".encode()
 
     async def home(self, request: Request) -> bytes:
-        return b"HTTP/1.1 200 OK\r\n\r\n"
+        return f"HTTP/1.1 200 OK{CRLF}{CRLF}".encode()
 
     async def echo(self, request: Request) -> bytes:
         params = request.params
         if params is None:
             return await self.make_bad_request(status_code=400, reason="Bad Request")
-        resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-        resp += f"Content-Length: {len(params)}\r\n\r\n".encode()
+        resp = REQ_LINE_200
+        resp += CRLF.encode()
+        resp += f"Content-Type: text/plain{CRLF}".encode()
+        resp += f"Content-Length: {len(params)}{CRLF}".encode()
+        resp += CRLF.encode()
         resp += params.encode()
         return resp
+
+    async def files(self, request: Request) -> bytes:
+        if not request.params:
+            return await self.make_bad_request(400, "Bad Request")
+        path = f"{self.directory}/{request.params}"
+        try:
+            with open(path, "r") as f:
+                content = f.read().encode()
+        except FileNotFoundError:
+            return await self.make_bad_request()
+        resp = REQ_LINE_200
+        resp += CRLF.encode()
+        resp += f"{HTTPHeader.CONTENT_TYPE.value}: application/octet-stream{CRLF}".encode()
+        resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(content)}{CRLF}".encode()
+        resp += CRLF.encode()
+
+        # body
+        resp += content
+        return resp
+        
 
     async def user_agent(self, request: Request) -> bytes:
         try:
@@ -87,13 +113,13 @@ class HTTPServer:
         except KeyError:
             return await self.make_bad_request()
 
-        resp = b"HTTP/1.1 200 OK"
+        resp = REQ_LINE_200
         resp += CRLF.encode()
         resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain {CRLF}".encode()
         resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(user_agent)} {CRLF}".encode()
         resp += CRLF.encode()
 
-        # Body
+        # body
         resp += user_agent.encode()
         return resp
 
@@ -140,5 +166,8 @@ class HTTPServer:
 
 
 if __name__ == "__main__":
-    server = HTTPServer(port=4221)
+    parser = argparse.ArgumentParser("HTTP server")
+    parser.add_argument("--directory")
+    args = parser.parse_args()
+    server = HTTPServer(port=4221, directory=args.directory)
     asyncio.run(server.start())
