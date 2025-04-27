@@ -107,8 +107,8 @@ class HTTPServer:
             target = raw_target.removesuffix(f"/{maybe_params}")
         else:
             target = raw_target
-        
-        if not target in self.routes: 
+
+        if not target in self.routes:
             raise TargetNotFoundException
 
         headers: dict[str, str] = {}
