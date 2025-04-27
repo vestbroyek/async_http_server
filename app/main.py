@@ -8,7 +8,8 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 CRLF = "\r\n"
-REQ_LINE_200 = b"HTTP/1.1 200 OK"
+RESP_LINE_200 = b"HTTP/1.1 200 OK"
+RESP_LINE_201 = b"HTTP/1.1 201 Created"
 
 def extract_params(requested_target: str) -> str | None:
     if requested_target.count("/") == 1:
@@ -37,7 +38,7 @@ class Request:
     method: HTTPMethod
     target: str
     headers: dict[str, str]
-    body: list[str]
+    body: str
     params: str | None
     version: str = "HTTP/1.1"
 
@@ -47,18 +48,23 @@ class TargetNotFoundException(Exception):
 
 
 type Route = Callable[..., Coroutine[Any, Any, bytes]]
-
+type RouteDirectory = dict[HTTPMethod, dict[str, Route]]
 
 class HTTPServer:
     def __init__(self, port: int, directory: str, bufsize: int = 1024) -> None:
         self.port = port
         self.directory = directory
         self.bufsize = bufsize
-        self.routes: dict[str, Route] = {
-            "/": self.home,
-            "/echo": self.echo,
-            "/user-agent": self.user_agent,
-            "/files": self.files,
+        self.routes: RouteDirectory = {
+            HTTPMethod.GET: {
+                "/": self.home,
+                "/echo": self.echo,
+                "/user-agent": self.user_agent,
+                "/files": self.get_file,
+            },
+            HTTPMethod.POST: {
+                "/files": self.post_file, 
+            }
         }
 
     async def start(self) -> None:
@@ -79,15 +85,15 @@ class HTTPServer:
         params = request.params
         if params is None:
             return await self.make_bad_request(status_code=400, reason="Bad Request")
-        resp = REQ_LINE_200
+        resp = RESP_LINE_200
         resp += CRLF.encode()
-        resp += f"Content-Type: text/plain{CRLF}".encode()
-        resp += f"Content-Length: {len(params)}{CRLF}".encode()
+        resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain{CRLF}".encode()
+        resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(params)}{CRLF}".encode()
         resp += CRLF.encode()
         resp += params.encode()
         return resp
 
-    async def files(self, request: Request) -> bytes:
+    async def get_file(self, request: Request) -> bytes:
         if not request.params:
             return await self.make_bad_request(400, "Bad Request")
         path = f"{self.directory}/{request.params}"
@@ -96,7 +102,7 @@ class HTTPServer:
                 content = f.read().encode()
         except FileNotFoundError:
             return await self.make_bad_request()
-        resp = REQ_LINE_200
+        resp = RESP_LINE_200
         resp += CRLF.encode()
         resp += f"{HTTPHeader.CONTENT_TYPE.value}: application/octet-stream{CRLF}".encode()
         resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(content)}{CRLF}".encode()
@@ -105,6 +111,15 @@ class HTTPServer:
         # body
         resp += content
         return resp
+    
+    async def post_file(self, request: Request) -> bytes:
+        if not request.params:
+            return await self.make_bad_request(400, "Bad Request")
+        
+        path = f"{self.directory}/{request.params}"
+        with open(path, "w") as f:
+            f.write(request.body)
+        return RESP_LINE_201
         
 
     async def user_agent(self, request: Request) -> bytes:
@@ -113,7 +128,7 @@ class HTTPServer:
         except KeyError:
             return await self.make_bad_request()
 
-        resp = REQ_LINE_200
+        resp = RESP_LINE_200
         resp += CRLF.encode()
         resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain {CRLF}".encode()
         resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(user_agent)} {CRLF}".encode()
@@ -126,7 +141,7 @@ class HTTPServer:
     async def parse_request(self, req: bytes) -> Request:
         data = req.decode().split(CRLF)
         req_line = data.pop(0)
-        method, raw_target, version = req_line.split(" ")
+        raw_method, raw_target, version = req_line.split(" ")
 
         maybe_params = extract_params(raw_target)
         if maybe_params is not None:
@@ -134,18 +149,22 @@ class HTTPServer:
         else:
             target = raw_target
 
-        if not target in self.routes:
+        method = HTTPMethod(raw_method)
+        if not target in self.routes[method]:
             raise TargetNotFoundException
 
         headers: dict[str, str] = {}
-        body: list[str] = []
+        body: str = ""
         for line in data:
             if ": " in line:
                 k, v = line.split(": ")
                 headers[k] = v
+            elif line == "":
+                continue
             else:
-                body.append(line)
-        return Request(HTTPMethod(method), target, headers, body, maybe_params, version)
+                body = line
+
+        return Request(method, target, headers, body, maybe_params, version)
 
     async def handle_client(self, reader: StreamReader, writer: StreamWriter) -> None:
         while True:
@@ -159,7 +178,7 @@ class HTTPServer:
                 writer.write(await self.make_bad_request())
                 await writer.drain()
             else:
-                func = self.routes[request.target]
+                func = self.routes[request.method][request.target]
                 resp = await func(request)
                 writer.write(resp)
                 await writer.drain()
