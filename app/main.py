@@ -1,53 +1,136 @@
+from __future__ import annotations
 from dataclasses import dataclass
-import socket  # noqa: F401
+from enum import Enum
+import socket
+from socket import socket as Socket
+from collections.abc import Callable
 
 CRLF = "\r\n"
 
-# Route has any number of words and optionally query params; the last value is the param
-@dataclass
-class Endpoint:
-    path: str
-    accepts_params: bool
 
-ENDPOINTS = [Endpoint("/", False), Endpoint("echo", True)]
-
-def is_valid_target(requested_target: str) -> bool:
-    if requested_target == "/":
-        return True
-    elif requested_target.startswith("/echo/"):
-        return True
-    else:
-        return False
-    
-def has_params(requested_target: str) -> bool:
-    return requested_target.count("/") > 1
-
-def extract_params(requested_target: str) -> str:
+def extract_params(requested_target: str) -> str | None:
+    if requested_target.count("/") == 1:
+        return None
     return requested_target.split("/")[-1]
 
-def main():
-    server_socket = socket.create_server(("localhost", 4221), reuse_port=True)
-    print("Started server")
-    conn, addr = server_socket.accept() # wait for client
-    with conn:
-        print(f"Connected by {addr}")
-        while True:
-            raw_data = conn.recv(1024)
-            data = raw_data.decode().split(CRLF)
-            req_line = data.pop(0)
-            method, target, version = req_line.split(" ")
-            if not is_valid_target(target):
-                resp = b"HTTP/1.1 404 Not Found\r\n\r\n"
+class HTTPHeader(Enum):
+    HOST = "Host"
+    USER_AGENT = "User-Agent"
+    ACCEPT = "Accept"
+    CONTENT_TYPE = "Content-Type"
+    CONTENT_LENGTH = "Content-Length"
+
+class HTTPMethod(Enum):
+    GET = "GET"
+    POST = "POST"
+    PUT = "PUT"
+    PATCH = "PATCH"
+    DELETE = "DELETE"
+
+
+@dataclass
+class Request:
+    method: HTTPMethod 
+    target: str
+    headers: dict[str, str]
+    body: list[str]
+    params: str | None
+    version: str = "HTTP/1.1"
+
+class TargetNotFoundException(Exception):
+    pass
+
+type Route = Callable[..., bytes]
+
+class HTTPServer:
+    """Single-client HTTP server"""
+
+    def __init__(self, port: int, bufsize: int = 1024) -> None:
+        self.bufsize = bufsize
+        self.routes: dict[str, Route] = {
+            "/": self.home,
+            "/echo": self.echo,
+            "/user-agent": self.user_agent
+        }
+        self.server = socket.create_server(("localhost", port), reuse_port=True)
+        print("Started server")
+
+    def make_bad_request(self, status_code: int = 404, reason: str = "Not found") -> bytes:
+        resp = b"HTTP 1.1"
+        resp += f"{status_code} {reason} {CRLF} {CRLF}".encode() 
+        return resp
+    
+    def home(self, request: Request) -> bytes:
+        return b"HTTP/1.1 200 OK\r\n\r\n"
+    
+    def echo(self, request: Request) -> bytes:
+        params = request.params
+        if params is None:
+            return self.make_bad_request() # should be like 400
+        resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+        resp += f"Content-Length: {len(params)}\r\n\r\n".encode()
+        resp += params.encode()
+        return resp
+
+    def user_agent(self, request: Request) -> bytes:
+        try:
+            user_agent = request.headers[HTTPHeader.USER_AGENT.value]
+        except KeyError:
+            return self.make_bad_request()
+
+        resp = b"HTTP/1.1 200 OK"
+        resp += CRLF.encode()
+        resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain {CRLF}".encode()
+        resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(user_agent)} {CRLF}".encode()
+        resp += CRLF.encode()
+
+        # Body
+        resp += user_agent.encode()
+        return resp
+
+    def parse_request(self, req: bytes) -> Request:
+        data = req.decode().split(CRLF)
+        req_line = data.pop(0)
+        method, raw_target, version = req_line.split(" ")
+
+        if not raw_target.startswith(tuple(self.routes.keys())):
+            raise TargetNotFoundException
+        maybe_params = extract_params(raw_target)
+        if maybe_params is not None:
+            target = raw_target.removesuffix(f"/{maybe_params}")
+        else:
+            target = raw_target
+
+        headers: dict[str, str] = {}
+        body: list[str] = []
+        for line in data:
+            if ": " in line:
+                k, v = line.split(": ")
+                headers[k] = v
             else:
-                if not has_params(target):
-                    resp = b"HTTP/1.1 200 OK\r\n\r\n"
+                body.append(line)
+        return Request(HTTPMethod(method), target, headers, body, maybe_params, version)
+
+    def start(self) -> None:
+        conn, addr = self.server.accept()
+        print(f"New connection from {addr}")
+
+        with conn:
+            while True:
+                raw_data = conn.recv(self.bufsize)
+                if not raw_data:
+                    print(f"Client at {addr} disconnected")
+                    break 
+                try:
+                    request = self.parse_request(raw_data)
+                except TargetNotFoundException:
+                    conn.sendall(self.make_bad_request())
                 else:
-                    params = extract_params(target)
-                    resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                    resp += f"Content-Length: {len(params)}\r\n\r\n".encode()
-                    resp += params.encode()
-            conn.sendall(resp)
-        
+                    func = self.routes[request.target]
+                    resp = func(request)
+                    conn.sendall(resp)
+            
 
 if __name__ == "__main__":
-    main()
+    server = HTTPServer(port=4221)
+    server.start()
