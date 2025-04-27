@@ -1,8 +1,10 @@
 from __future__ import annotations
+import asyncio
+from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
 from enum import Enum
-import socket
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 CRLF = "\r\n"
 
@@ -43,44 +45,47 @@ class TargetNotFoundException(Exception):
     pass
 
 
-type Route = Callable[..., bytes]
+type Route = Callable[..., Coroutine[Any, Any, bytes]]
 
 
 class HTTPServer:
-    """Single-client HTTP server"""
-
     def __init__(self, port: int, bufsize: int = 1024) -> None:
+        self.port = port
         self.bufsize = bufsize
         self.routes: dict[str, Route] = {
             "/": self.home,
             "/echo": self.echo,
             "/user-agent": self.user_agent,
         }
-        self.server = socket.create_server(("localhost", port), reuse_port=True)
-        print("Started server")
 
-    def make_bad_request(
+    async def start(self) -> None:
+        server = await asyncio.start_server(self.handle_client, "localhost", self.port)
+        print("Started server")
+        async with server:
+            await server.serve_forever()
+
+    async def make_bad_request(
         self, status_code: int = 404, reason: str = "Not Found"
     ) -> bytes:
         return f"HTTP/1.1 {status_code} {reason}{CRLF}{CRLF}".encode()
 
-    def home(self, request: Request) -> bytes:
+    async def home(self, request: Request) -> bytes:
         return b"HTTP/1.1 200 OK\r\n\r\n"
 
-    def echo(self, request: Request) -> bytes:
+    async def echo(self, request: Request) -> bytes:
         params = request.params
         if params is None:
-            return self.make_bad_request(status_code=400, reason="Bad Request")
+            return await self.make_bad_request(status_code=400, reason="Bad Request")
         resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
         resp += f"Content-Length: {len(params)}\r\n\r\n".encode()
         resp += params.encode()
         return resp
 
-    def user_agent(self, request: Request) -> bytes:
+    async def user_agent(self, request: Request) -> bytes:
         try:
             user_agent = request.headers[HTTPHeader.USER_AGENT.value]
         except KeyError:
-            return self.make_bad_request()
+            return await self.make_bad_request()
 
         resp = b"HTTP/1.1 200 OK"
         resp += CRLF.encode()
@@ -92,7 +97,7 @@ class HTTPServer:
         resp += user_agent.encode()
         return resp
 
-    def parse_request(self, req: bytes) -> Request:
+    async def parse_request(self, req: bytes) -> Request:
         data = req.decode().split(CRLF)
         req_line = data.pop(0)
         method, raw_target, version = req_line.split(" ")
@@ -116,26 +121,24 @@ class HTTPServer:
                 body.append(line)
         return Request(HTTPMethod(method), target, headers, body, maybe_params, version)
 
-    def start(self) -> None:
-        conn, addr = self.server.accept()
-        print(f"New connection from {addr}")
-
-        with conn:
-            while True:
-                raw_data = conn.recv(self.bufsize)
-                if not raw_data:
-                    print(f"Client at {addr} disconnected")
-                    break
-                try:
-                    request = self.parse_request(raw_data)
-                except TargetNotFoundException:
-                    conn.sendall(self.make_bad_request())
-                else:
-                    func = self.routes[request.target]
-                    resp = func(request)
-                    conn.sendall(resp)
+    async def handle_client(self, reader: StreamReader, writer: StreamWriter) -> None:
+        while True:
+            raw_data = await reader.read(self.bufsize)
+            if not raw_data:
+                print(f"Client disconnected")
+                break
+            try:
+                request = await self.parse_request(raw_data)
+            except TargetNotFoundException:
+                writer.write(await self.make_bad_request())
+                await writer.drain()
+            else:
+                func = self.routes[request.target]
+                resp = await func(request)
+                writer.write(resp)
+                await writer.drain()
 
 
 if __name__ == "__main__":
     server = HTTPServer(port=4221)
-    server.start()
+    asyncio.run(server.start())
