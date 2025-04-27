@@ -119,7 +119,9 @@ class HTTPServer:
         path = f"{self.directory}/{request.params}"
         with open(path, "w") as f:
             f.write(request.body)
-        return RESP_LINE_201
+        resp = RESP_LINE_201
+        resp += f"{CRLF}{CRLF}".encode()
+        return resp
         
 
     async def user_agent(self, request: Request) -> bytes:
