@@ -2,7 +2,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import socket
-from socket import socket as Socket
 from collections.abc import Callable
 
 CRLF = "\r\n"
@@ -13,12 +12,14 @@ def extract_params(requested_target: str) -> str | None:
         return None
     return requested_target.split("/")[-1]
 
+
 class HTTPHeader(Enum):
     HOST = "Host"
     USER_AGENT = "User-Agent"
     ACCEPT = "Accept"
     CONTENT_TYPE = "Content-Type"
     CONTENT_LENGTH = "Content-Length"
+
 
 class HTTPMethod(Enum):
     GET = "GET"
@@ -30,17 +31,20 @@ class HTTPMethod(Enum):
 
 @dataclass
 class Request:
-    method: HTTPMethod 
+    method: HTTPMethod
     target: str
     headers: dict[str, str]
     body: list[str]
     params: str | None
     version: str = "HTTP/1.1"
 
+
 class TargetNotFoundException(Exception):
     pass
 
+
 type Route = Callable[..., bytes]
+
 
 class HTTPServer:
     """Single-client HTTP server"""
@@ -50,23 +54,25 @@ class HTTPServer:
         self.routes: dict[str, Route] = {
             "/": self.home,
             "/echo": self.echo,
-            "/user-agent": self.user_agent
+            "/user-agent": self.user_agent,
         }
         self.server = socket.create_server(("localhost", port), reuse_port=True)
         print("Started server")
 
-    def make_bad_request(self, status_code: int = 404, reason: str = "Not found") -> bytes:
+    def make_bad_request(
+        self, status_code: int = 404, reason: str = "Not Found"
+    ) -> bytes:
         resp = b"HTTP 1.1"
-        resp += f"{status_code} {reason} {CRLF} {CRLF}".encode() 
+        resp += f"{status_code} {reason} {CRLF} {CRLF}".encode()
         return resp
-    
+
     def home(self, request: Request) -> bytes:
         return b"HTTP/1.1 200 OK\r\n\r\n"
-    
+
     def echo(self, request: Request) -> bytes:
         params = request.params
         if params is None:
-            return self.make_bad_request() # should be like 400
+            return self.make_bad_request(status_code=400, reason="Bad Request")
         resp = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
         resp += f"Content-Length: {len(params)}\r\n\r\n".encode()
         resp += params.encode()
@@ -84,7 +90,7 @@ class HTTPServer:
         resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(user_agent)} {CRLF}".encode()
         resp += CRLF.encode()
 
-        # Body
+        # Body
         resp += user_agent.encode()
         return resp
 
@@ -93,13 +99,14 @@ class HTTPServer:
         req_line = data.pop(0)
         method, raw_target, version = req_line.split(" ")
 
-        if not raw_target.startswith(tuple(self.routes.keys())):
-            raise TargetNotFoundException
         maybe_params = extract_params(raw_target)
         if maybe_params is not None:
             target = raw_target.removesuffix(f"/{maybe_params}")
         else:
             target = raw_target
+        
+        if not target in self.routes: 
+            raise TargetNotFoundException
 
         headers: dict[str, str] = {}
         body: list[str] = []
@@ -120,7 +127,7 @@ class HTTPServer:
                 raw_data = conn.recv(self.bufsize)
                 if not raw_data:
                     print(f"Client at {addr} disconnected")
-                    break 
+                    break
                 try:
                     request = self.parse_request(raw_data)
                 except TargetNotFoundException:
@@ -129,7 +136,7 @@ class HTTPServer:
                     func = self.routes[request.target]
                     resp = func(request)
                     conn.sendall(resp)
-            
+
 
 if __name__ == "__main__":
     server = HTTPServer(port=4221)
