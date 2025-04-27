@@ -62,9 +62,7 @@ class HTTPServer:
     def make_bad_request(
         self, status_code: int = 404, reason: str = "Not Found"
     ) -> bytes:
-        resp = b"HTTP/1.1 "
-        resp += f"{status_code} {reason} {CRLF} {CRLF}".encode()
-        return resp
+        return f"HTTP/1.1 {status_code} {reason}{CRLF}{CRLF}".encode()
 
     def home(self, request: Request) -> bytes:
         return b"HTTP/1.1 200 OK\r\n\r\n"
