@@ -117,9 +117,13 @@ class HTTPServer:
                 else:
                     pass
 
-                if (content_encoding := request.headers.get(HTTPHeader.ACCEPT_ENCODING.value)) is not None:
-                    if content_encoding in SUPPORTED_ENCODINGS:
-                        resp += f"{HTTPHeader.CONTENT_ENCODING.value}: {content_encoding}{CRLF}".encode()
+                if (requested_content_encoding_raw := request.headers.get(HTTPHeader.ACCEPT_ENCODING.value)) is not None:
+                    requested_content_encodings = requested_content_encoding_raw.split(", ")
+                    try:
+                        content_encoding_match = next(filter(lambda enc: enc in SUPPORTED_ENCODINGS, requested_content_encodings))
+                        resp += f"{HTTPHeader.CONTENT_ENCODING.value}: {content_encoding_match}{CRLF}".encode()
+                    except StopIteration:
+                        print("None of the requested encodings are supported")
 
                 resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(ret)}{CRLF}".encode()
                 resp += CRLF.encode()
