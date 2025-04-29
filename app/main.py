@@ -4,6 +4,7 @@ import asyncio
 from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
 from enum import Enum
+import gzip
 from collections.abc import Callable, Coroutine
 from typing import Any, ParamSpec
 
@@ -143,6 +144,9 @@ class HTTPServer:
         params = request.params
         if params is None:
             raise MissingParamsException
+
+        if request.headers.get(HTTPHeader.ACCEPT_ENCODING.value) == "gzip":
+            return gzip.compress(params.encode())
         return params.encode()
 
     @route(declared_content_type="application/octet-stream")
