@@ -5,11 +5,12 @@ from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
 from enum import Enum
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, ParamSpec
 
 CRLF = "\r\n"
 RESP_LINE_200 = b"HTTP/1.1 200 OK"
 RESP_LINE_201 = b"HTTP/1.1 201 Created"
+SUPPORTED_ENCODINGS = ["gzip"]
 
 def extract_params(requested_target: str) -> str | None:
     if requested_target.count("/") == 1:
@@ -21,6 +22,8 @@ class HTTPHeader(Enum):
     HOST = "Host"
     USER_AGENT = "User-Agent"
     ACCEPT = "Accept"
+    ACCEPT_ENCODING = "Accept-Encoding"
+    CONTENT_ENCODING = "Content-Encoding"
     CONTENT_TYPE = "Content-Type"
     CONTENT_LENGTH = "Content-Length"
 
@@ -46,9 +49,18 @@ class Request:
 class TargetNotFoundException(Exception):
     pass
 
+class MissingParamsException(Exception):
+    pass
+
+class MissingHeaderException(Exception):
+    pass
+
+class ResourceNotFoundException(Exception):
+    pass
 
 type Route = Callable[..., Coroutine[Any, Any, bytes]]
 type RouteDirectory = dict[HTTPMethod, dict[str, Route]]
+TArgs = ParamSpec("TArgs")
 
 class HTTPServer:
     def __init__(self, port: int, directory: str, bufsize: int = 1024) -> None:
@@ -73,72 +85,93 @@ class HTTPServer:
         async with server:
             await server.serve_forever()
 
-    async def make_bad_request(
-        self, status_code: int = 404, reason: str = "Not Found"
-    ) -> bytes:
+    @staticmethod
+    async def make_bad_request(status_code: int, reason: str) -> bytes:
         return f"HTTP/1.1 {status_code} {reason}{CRLF}{CRLF}".encode()
 
-    async def home(self, request: Request) -> bytes:
-        return f"HTTP/1.1 200 OK{CRLF}{CRLF}".encode()
+    @staticmethod
+    def route(retcode: int = 200) -> Callable[[Route], Route]:
+        def decorator(func: Route) -> Route:
+            async def wrapper(self: Any, request: Request) -> bytes:
+                try:
+                    ret = await func(self, request)
+                except (MissingParamsException, MissingHeaderException):
+                    return await HTTPServer.make_bad_request(status_code=400, reason="Bad Request")
+                except ResourceNotFoundException:
+                    return await HTTPServer.make_bad_request(status_code=404, reason="Not Found")
 
+                if retcode == 200:
+                    resp = RESP_LINE_200
+                elif retcode == 201:
+                    resp = RESP_LINE_201
+                else:
+                    raise ValueError(f"Return code {retcode} not supported")
+
+                resp += CRLF.encode()
+
+                if (content_type := request.headers.get(HTTPHeader.CONTENT_TYPE.value)) is not None:
+                    resp += f"{HTTPHeader.CONTENT_TYPE.value}: {content_type}{CRLF}".encode()
+                elif content_type is None and len(ret) > 0:
+                    # If not set by the client, we set it ourselves 
+                    resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain{CRLF}".encode()
+                else:
+                    pass
+
+                if (content_encoding := request.headers.get(HTTPHeader.ACCEPT_ENCODING.value)) is not None:
+                    if content_encoding in SUPPORTED_ENCODINGS:
+                        resp += f"{HTTPHeader.CONTENT_ENCODING.value}: {content_encoding}{CRLF}".encode()
+
+                resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(ret)}{CRLF}".encode()
+                resp += CRLF.encode()
+
+                resp += ret
+
+                return resp
+            return wrapper
+        return decorator
+
+    @route()
+    async def home(self, request: Request) -> bytes:
+        return b""
+
+    @route()
     async def echo(self, request: Request) -> bytes:
         params = request.params
         if params is None:
-            return await self.make_bad_request(status_code=400, reason="Bad Request")
-        resp = RESP_LINE_200
-        resp += CRLF.encode()
-        resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain{CRLF}".encode()
-        resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(params)}{CRLF}".encode()
-        resp += CRLF.encode()
-        resp += params.encode()
-        return resp
+            raise MissingParamsException
+        return params.encode()
 
+    @route()
     async def get_file(self, request: Request) -> bytes:
         if not request.params:
-            return await self.make_bad_request(400, "Bad Request")
+            raise MissingParamsException
+        
         path = f"{self.directory}/{request.params}"
         try:
             with open(path, "r") as f:
                 content = f.read().encode()
-        except FileNotFoundError:
-            return await self.make_bad_request()
-        resp = RESP_LINE_200
-        resp += CRLF.encode()
-        resp += f"{HTTPHeader.CONTENT_TYPE.value}: application/octet-stream{CRLF}".encode()
-        resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(content)}{CRLF}".encode()
-        resp += CRLF.encode()
-
-        # body
-        resp += content
-        return resp
+        except:
+            raise ResourceNotFoundException
+        
+        return content
     
+    @route(retcode=201)
     async def post_file(self, request: Request) -> bytes:
         if not request.params:
-            return await self.make_bad_request(400, "Bad Request")
+            raise MissingParamsException
         
         path = f"{self.directory}/{request.params}"
         with open(path, "w") as f:
             f.write(request.body)
-        resp = RESP_LINE_201
-        resp += f"{CRLF}{CRLF}".encode()
-        return resp
+        return b"" # TODO should be able to return None
         
 
     async def user_agent(self, request: Request) -> bytes:
         try:
             user_agent = request.headers[HTTPHeader.USER_AGENT.value]
         except KeyError:
-            return await self.make_bad_request()
-
-        resp = RESP_LINE_200
-        resp += CRLF.encode()
-        resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain {CRLF}".encode()
-        resp += f"{HTTPHeader.CONTENT_LENGTH.value}: {len(user_agent)} {CRLF}".encode()
-        resp += CRLF.encode()
-
-        # body
-        resp += user_agent.encode()
-        return resp
+            raise MissingHeaderException
+        return user_agent.encode()
 
     async def parse_request(self, req: bytes) -> Request:
         data = req.decode().split(CRLF)
@@ -177,7 +210,7 @@ class HTTPServer:
             try:
                 request = await self.parse_request(raw_data)
             except TargetNotFoundException:
-                writer.write(await self.make_bad_request())
+                writer.write(await HTTPServer.make_bad_request(404, "Not Found"))
                 await writer.drain()
             else:
                 func = self.routes[request.method][request.target]
