@@ -24,6 +24,7 @@ class HTTPHeader(Enum):
     USER_AGENT = "User-Agent"
     ACCEPT = "Accept"
     ACCEPT_ENCODING = "Accept-Encoding"
+    CONNECTION = "Connection"
     CONTENT_ENCODING = "Content-Encoding"
     CONTENT_TYPE = "Content-Type"
     CONTENT_LENGTH = "Content-Length"
@@ -210,6 +211,14 @@ class HTTPServer:
 
         return Request(method, target, headers, body, maybe_params, version)
 
+    async def make_closed_response(self) -> bytes:
+        resp = RESP_LINE_200
+        resp += CRLF.encode()
+        resp += f"{HTTPHeader.CONNECTION.value}: close".encode()
+        resp += CRLF.encode()
+        resp += CRLF.encode()
+        return resp
+
     async def handle_client(self, reader: StreamReader, writer: StreamWriter) -> None:
         while True:
             raw_data = await reader.read(self.bufsize)
@@ -222,10 +231,16 @@ class HTTPServer:
                 writer.write(await HTTPServer.make_bad_request(404, "Not Found"))
                 await writer.drain()
             else:
-                func = self.routes[request.method][request.target]
-                resp = await func(request)
-                writer.write(resp)
-                await writer.drain()
+                if request.headers.get(HTTPHeader.CONNECTION.value) == "close":
+                    resp = await self.make_closed_response()
+                    writer.write(resp)
+                    writer.close()
+                    await writer.wait_closed()
+                else:
+                    func = self.routes[request.method][request.target]
+                    resp = await func(request)
+                    writer.write(resp)
+                    await writer.drain()
 
 
 if __name__ == "__main__":
