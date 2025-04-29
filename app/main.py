@@ -90,7 +90,7 @@ class HTTPServer:
         return f"HTTP/1.1 {status_code} {reason}{CRLF}{CRLF}".encode()
 
     @staticmethod
-    def route(retcode: int = 200) -> Callable[[Route], Route]:
+    def route(retcode: int = 200, declared_content_type: str = "text/plain") -> Callable[[Route], Route]:
         def decorator(func: Route) -> Route:
             async def wrapper(self: Any, request: Request) -> bytes:
                 try:
@@ -109,11 +109,11 @@ class HTTPServer:
 
                 resp += CRLF.encode()
 
-                if (content_type := request.headers.get(HTTPHeader.CONTENT_TYPE.value)) is not None:
-                    resp += f"{HTTPHeader.CONTENT_TYPE.value}: {content_type}{CRLF}".encode()
-                elif content_type is None and len(ret) > 0:
+                if (requested_content_type := request.headers.get(HTTPHeader.CONTENT_TYPE.value)) is not None:
+                    resp += f"{HTTPHeader.CONTENT_TYPE.value}: {requested_content_type}{CRLF}".encode()
+                elif requested_content_type is None and len(ret) > 0:
                     # If not set by the client, we set it ourselves 
-                    resp += f"{HTTPHeader.CONTENT_TYPE.value}: text/plain{CRLF}".encode()
+                    resp += f"{HTTPHeader.CONTENT_TYPE.value}: {declared_content_type}{CRLF}".encode()
                 else:
                     pass
 
@@ -141,7 +141,7 @@ class HTTPServer:
             raise MissingParamsException
         return params.encode()
 
-    @route()
+    @route(declared_content_type="application/octet-stream")
     async def get_file(self, request: Request) -> bytes:
         if not request.params:
             raise MissingParamsException
@@ -155,7 +155,7 @@ class HTTPServer:
         
         return content
     
-    @route(retcode=201)
+    @route(retcode=201, declared_content_type="application/octet-stream")
     async def post_file(self, request: Request) -> bytes:
         if not request.params:
             raise MissingParamsException
@@ -166,6 +166,7 @@ class HTTPServer:
         return b"" # TODO should be able to return None
         
 
+    @route()
     async def user_agent(self, request: Request) -> bytes:
         try:
             user_agent = request.headers[HTTPHeader.USER_AGENT.value]
